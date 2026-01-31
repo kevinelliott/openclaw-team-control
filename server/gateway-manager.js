@@ -431,61 +431,87 @@ class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Update sessions from gateway - shows each session individually
+   * Update sessions from gateway - groups by agentId, shows only agents/subagents
    */
   _updateSessionsFromGateway(gatewayId, sessions) {
     const gateway = this.gateways.get(gatewayId);
     if (!gateway) return;
 
-    const seenIds = new Set();
+    // Group sessions by agentId
+    const agentGroups = new Map(); // agentId -> { sessions: [], subagents: [] }
+    const subagents = []; // Standalone subagent entries
 
     for (const session of sessions) {
       const sessionKey = session.sessionKey || session.key || session.id;
       if (!sessionKey) continue;
       
-      const compositeId = `${gatewayId}:${sessionKey}`;
-      seenIds.add(compositeId);
-      
       const agentId = this._extractAgentId(session);
       const sessionType = this._getSessionType(sessionKey);
-      const isActive = session.status === 'active' || session.active;
       
-      // Derive a friendly name
-      let displayName = session.label || session.displayName;
-      if (!displayName) {
-        if (sessionType === 'cron') {
-          displayName = 'Scheduled Task';
-        } else if (sessionType === 'subagent') {
-          displayName = session.label || 'Sub-agent';
-        } else if (sessionType === 'group') {
-          displayName = session.displayName || 'Group Chat';
-        } else if (sessionType === 'main') {
-          displayName = 'Main Chat';
-        } else {
-          displayName = this._deriveSessionLabel(session);
-        }
+      // Subagents get their own entry
+      if (sessionType === 'subagent') {
+        subagents.push({
+          sessionKey,
+          session,
+          agentId,
+          parentAgentId: agentId // The agent that spawned it
+        });
+        continue;
       }
+      
+      // Skip if we can't identify the agent
+      if (!agentId) continue;
+      
+      // Group by agentId
+      if (!agentGroups.has(agentId)) {
+        agentGroups.set(agentId, { sessions: [], model: null, lastActive: null });
+      }
+      
+      const group = agentGroups.get(agentId);
+      group.sessions.push({
+        sessionKey,
+        sessionType,
+        channel: session.channel,
+        status: session.status || (session.active ? 'active' : 'idle'),
+        lastActive: session.lastActiveAt || session.updatedAt,
+        messageCount: session.messageCount || 0,
+        totalTokens: session.totalTokens || 0,
+        label: session.label || session.displayName
+      });
+      
+      // Track latest model and activity
+      if (session.model) group.model = session.model;
+      const sessionTime = session.lastActiveAt || session.updatedAt;
+      if (sessionTime && (!group.lastActive || sessionTime > group.lastActive)) {
+        group.lastActive = sessionTime;
+      }
+    }
+
+    const seenIds = new Set();
+
+    // Create one entry per agent
+    for (const [agentId, group] of agentGroups) {
+      const compositeId = `${gatewayId}:${agentId}`;
+      seenIds.add(compositeId);
+      
+      const isActive = group.sessions.some(s => s.status === 'active');
+      const totalMessages = group.sessions.reduce((acc, s) => acc + (s.messageCount || 0), 0);
+      const totalTokens = group.sessions.reduce((acc, s) => acc + (s.totalTokens || 0), 0);
       
       const agent = {
         id: compositeId,
         gatewayId,
-        agentId: agentId || 'unknown',
-        sessionKey,
-        sessionType,
-        name: displayName,
+        agentId,
+        name: this._getAgentName(agentId),
         status: isActive ? 'active' : 'idle',
-        channel: session.channel || 'unknown',
-        lastActive: session.lastActiveAt || session.updatedAt,
-        messageCount: session.messageCount || 0,
-        totalTokens: session.totalTokens || 0,
-        model: session.model,
-        avatar: this._getAgentAvatar(agentId, sessionType),
-        // Include extra context
-        displayContext: session.displayName || session.deliveryContext?.to,
-        metadata: {
-          contextTokens: session.contextTokens,
-          transcriptPath: session.transcriptPath
-        }
+        sessionCount: group.sessions.length,
+        sessions: group.sessions,
+        lastActive: group.lastActive,
+        messageCount: totalMessages,
+        totalTokens,
+        model: group.model,
+        avatar: this._getAgentAvatar(agentId),
+        type: 'agent'
       };
 
       const existing = this.agents.get(compositeId);
@@ -495,7 +521,46 @@ class GatewayManager extends EventEmitter {
       }
     }
 
-    // Remove sessions that no longer exist
+    // NOTE: Subagents are NOT shown as separate entries
+    // They are ephemeral tasks spawned by agents - not real agents
+    // If needed, they could be shown nested under their parent agent
+    
+    // Skip subagent entries - only show real agents
+    // (subagents are still tracked in their parent agent's sessions if needed)
+    /*
+    for (const sub of subagents) {
+      const compositeId = `${gatewayId}:subagent:${sub.sessionKey}`;
+      seenIds.add(compositeId);
+      
+      const session = sub.session;
+      const isActive = session.status === 'active' || session.active;
+      
+      const agent = {
+        id: compositeId,
+        gatewayId,
+        agentId: sub.agentId,
+        sessionKey: sub.sessionKey,
+        name: session.label || 'Sub-agent',
+        status: isActive ? 'active' : 'idle',
+        sessionCount: 1,
+        lastActive: session.lastActiveAt || session.updatedAt,
+        messageCount: session.messageCount || 0,
+        totalTokens: session.totalTokens || 0,
+        model: session.model,
+        avatar: '🔧',
+        type: 'subagent',
+        parentAgentId: sub.parentAgentId
+      };
+
+      const existing = this.agents.get(compositeId);
+      if (!existing || JSON.stringify(existing) !== JSON.stringify(agent)) {
+        this.agents.set(compositeId, agent);
+        this.emit('agent:update', agent);
+      }
+    }
+    */
+
+    // Remove agents that no longer exist
     for (const [compositeId, agent] of this.agents) {
       if (agent.gatewayId === gatewayId && !seenIds.has(compositeId)) {
         this.agents.delete(compositeId);
@@ -504,6 +569,24 @@ class GatewayManager extends EventEmitter {
     }
 
     gateway.agents = Array.from(seenIds);
+  }
+
+  /**
+   * Get friendly name for an agent
+   */
+  _getAgentName(agentId) {
+    const names = {
+      main: 'Henry the Great',
+      personal: 'Jeeves',
+      family: 'Bixby',
+      pilot: 'Pilot',
+      pixel: 'Pixel',
+      forge: 'Forge',
+      atlas: 'Atlas',
+      compass: 'Compass',
+      canvas: 'Canvas'
+    };
+    return names[agentId] || agentId.charAt(0).toUpperCase() + agentId.slice(1);
   }
 
   /**

@@ -157,7 +157,25 @@ function App() {
     setTimeout(() => setDiscovering(false), 10000)
   }
 
-  const refresh = () => socket.emit('refresh')
+  const refresh = async () => {
+    // Try socket first
+    socket.emit('refresh')
+    // Also fetch via REST as fallback
+    try {
+      const [gwRes, agRes] = await Promise.all([
+        fetch('/api/gateways'),
+        fetch('/api/agents')
+      ])
+      const gateways = await gwRes.json()
+      const agents = await agRes.json()
+      if (gateways.length > 0 || agents.length > 0) {
+        setGateways(gateways)
+        setAgents(agents)
+      }
+    } catch (e) {
+      console.error('REST refresh failed:', e)
+    }
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-bg-dark">
