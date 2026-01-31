@@ -200,7 +200,7 @@ function getLanIP() {
 }
 
 // Start server and initialize gateway manager
-const PORT = process.env.PORT || 3334;
+const PORT = process.env.PORT || 3335;
 const HOST = process.env.HOST || '0.0.0.0';
 server.listen(PORT, HOST, () => {
   const lanIP = getLanIP();

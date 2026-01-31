@@ -7,12 +7,15 @@
  * - Persistent storage in JSON file
  * - WebSocket connections for realtime agent updates
  * - Health check polling for each gateway
+ * 
+ * Uses Clawdbot Gateway Protocol v3
  */
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const WebSocket = require('ws');
+const crypto = require('crypto');
 const dgram = require('dgram');
 const EventEmitter = require('events');
 
@@ -21,12 +24,14 @@ const GATEWAYS_FILE = path.join(DATA_DIR, 'gateways.json');
 const HEALTH_INTERVAL = 10000;  // 10 seconds
 const DISCOVERY_PORT = 18790;   // UDP broadcast port for discovery
 const RECONNECT_DELAY = 5000;   // 5 seconds before reconnect attempt
+const PROTOCOL_VERSION = 3;     // Clawdbot gateway protocol version
 
 class GatewayManager extends EventEmitter {
   constructor() {
     super();
     this.gateways = new Map();  // id -> gateway config + state
     this.connections = new Map(); // id -> WebSocket connection
+    this.pendingRequests = new Map(); // id -> Map(requestId -> { resolve, reject, timeout })
     this.healthTimers = new Map(); // id -> interval timer
     this.agents = new Map();    // agentId -> agent data
     this.discoverySocket = null;
@@ -105,7 +110,8 @@ class GatewayManager extends EventEmitter {
       lastError: null,
       agents: [],
       createdAt: new Date().toISOString(),
-      healthChecks: { success: 0, failure: 0 }
+      healthChecks: { success: 0, failure: 0 },
+      serverInfo: null  // Will be populated from hello-ok
     };
 
     this.gateways.set(id, gateway);
@@ -162,7 +168,14 @@ class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Connect to a gateway via WebSocket
+   * Generate unique request ID
+   */
+  _generateRequestId() {
+    return crypto.randomUUID();
+  }
+
+  /**
+   * Connect to a gateway via WebSocket using Clawdbot protocol
    */
   _connectToGateway(id) {
     const gateway = this.gateways.get(id);
@@ -175,19 +188,18 @@ class GatewayManager extends EventEmitter {
     console.log(`🔌 Connecting to gateway: ${gateway.name} (${wsUrl})`);
 
     try {
-      const headers = {};
-      if (gateway.token) {
-        headers['Authorization'] = `Bearer ${gateway.token}`;
-      }
+      // Clawdbot protocol doesn't use Authorization header - auth is in connect frame
+      const ws = new WebSocket(wsUrl, { 
+        handshakeTimeout: 5000,
+        maxPayload: 25 * 1024 * 1024  // 25MB for large responses
+      });
 
-      const ws = new WebSocket(wsUrl, { headers, handshakeTimeout: 5000 });
+      // Initialize pending requests map for this gateway
+      this.pendingRequests.set(id, new Map());
 
       ws.on('open', () => {
-        console.log(`✅ Connected to gateway: ${gateway.name}`);
-        this._updateGatewayStatus(id, 'online');
-        
-        // Request agent list
-        this._sendToGateway(id, { type: 'list_agents' });
+        console.log(`🔗 WebSocket open, sending connect frame to: ${gateway.name}`);
+        this._sendConnectFrame(id);
       });
 
       ws.on('message', (data) => {
@@ -205,9 +217,20 @@ class GatewayManager extends EventEmitter {
       });
 
       ws.on('close', (code, reason) => {
-        console.log(`❌ Gateway ${gateway.name} disconnected (${code})`);
+        const reasonStr = reason?.toString() || '';
+        console.log(`❌ Gateway ${gateway.name} disconnected (${code}) ${reasonStr}`);
         this._updateGatewayStatus(id, 'disconnected');
         this.connections.delete(id);
+        
+        // Clear pending requests
+        const pending = this.pendingRequests.get(id);
+        if (pending) {
+          for (const [reqId, req] of pending) {
+            clearTimeout(req.timeout);
+            req.reject(new Error(`Connection closed: ${code}`));
+          }
+          pending.clear();
+        }
         
         // Schedule reconnect
         setTimeout(() => {
@@ -225,70 +248,192 @@ class GatewayManager extends EventEmitter {
   }
 
   /**
+   * Send Clawdbot protocol connect frame
+   */
+  _sendConnectFrame(id) {
+    const gateway = this.gateways.get(id);
+    if (!gateway) return;
+
+    const connectParams = {
+      minProtocol: PROTOCOL_VERSION,
+      maxProtocol: PROTOCOL_VERSION,
+      client: {
+        id: 'clawdbot-control-ui',  // Valid Clawdbot client ID
+        displayName: 'Team Control Dashboard',
+        version: '1.0.0',
+        platform: process.platform,
+        mode: 'ui'  // Valid mode for UI clients
+      },
+      caps: ['sessions.list', 'agents.list', 'sessions.subscribe'],
+      role: 'operator',
+      scopes: ['operator.read'],
+      auth: gateway.token ? { token: gateway.token } : undefined
+    };
+
+    this._sendRequest(id, 'connect', connectParams)
+      .then((helloOk) => {
+        console.log(`✅ Connected to gateway: ${gateway.name} (protocol v${helloOk.protocol})`);
+        gateway.serverInfo = helloOk.server;
+        this._updateGatewayStatus(id, 'online');
+        
+        // Request sessions/agents list
+        this._sendRequest(id, 'sessions.list', {}).then(result => {
+          if (result?.sessions) {
+            this._updateSessionsFromGateway(id, result.sessions);
+          }
+        }).catch(err => {
+          console.log(`Failed to get sessions from ${gateway.name}:`, err.message);
+        });
+      })
+      .catch((err) => {
+        console.error(`Failed to connect to ${gateway.name}:`, err.message);
+        this._updateGatewayStatus(id, 'error', err.message);
+      });
+  }
+
+  /**
+   * Send a request frame and wait for response
+   */
+  _sendRequest(id, method, params, timeoutMs = 10000) {
+    return new Promise((resolve, reject) => {
+      const ws = this.connections.get(id);
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return reject(new Error('WebSocket not connected'));
+      }
+
+      const requestId = this._generateRequestId();
+      const frame = {
+        type: 'req',
+        id: requestId,
+        method,
+        params
+      };
+
+      const timeout = setTimeout(() => {
+        const pending = this.pendingRequests.get(id);
+        if (pending) pending.delete(requestId);
+        reject(new Error(`Request timeout: ${method}`));
+      }, timeoutMs);
+
+      const pending = this.pendingRequests.get(id);
+      if (pending) {
+        pending.set(requestId, { resolve, reject, timeout });
+      }
+
+      ws.send(JSON.stringify(frame));
+    });
+  }
+
+  /**
    * Handle messages from gateway WebSocket
    */
   _handleGatewayMessage(gatewayId, msg) {
     const gateway = this.gateways.get(gatewayId);
     if (!gateway) return;
 
-    switch (msg.type) {
-      case 'agents':
-      case 'agent_list':
-        // Full agent list from gateway
-        this._updateAgentsFromGateway(gatewayId, msg.agents || []);
+    // Handle response frames
+    if (msg.type === 'res') {
+      const pending = this.pendingRequests.get(gatewayId);
+      if (pending && pending.has(msg.id)) {
+        const req = pending.get(msg.id);
+        clearTimeout(req.timeout);
+        pending.delete(msg.id);
+
+        if (msg.ok) {
+          req.resolve(msg.payload);
+        } else {
+          req.reject(new Error(msg.error?.message || 'Request failed'));
+        }
+      }
+      return;
+    }
+
+    // Handle event frames
+    if (msg.type === 'event') {
+      this._handleGatewayEvent(gatewayId, msg.event, msg.payload);
+      return;
+    }
+
+    // Handle hello-ok (legacy compatibility)
+    if (msg.type === 'hello-ok') {
+      // This shouldn't happen in normal flow, but handle it
+      gateway.serverInfo = msg.server;
+      this._updateGatewayStatus(gatewayId, 'online');
+      return;
+    }
+
+    // Unknown frame type
+    console.log(`Unknown frame type from ${gateway.name}:`, msg.type);
+  }
+
+  /**
+   * Handle event frames from gateway
+   */
+  _handleGatewayEvent(gatewayId, event, payload) {
+    const gateway = this.gateways.get(gatewayId);
+    if (!gateway) return;
+
+    switch (event) {
+      case 'tick':
+        // Heartbeat tick from gateway
+        this._updateGatewayStatus(gatewayId, 'online');
         break;
 
-      case 'agent_update':
-      case 'agent:update':
-        // Single agent update
-        this._updateAgent(gatewayId, msg.agent || msg.data);
+      case 'session:update':
+      case 'session:created':
+        this._updateSession(gatewayId, payload);
         break;
 
-      case 'agent_added':
-      case 'agent:added':
-        this._updateAgent(gatewayId, msg.agent || msg.data);
-        break;
-
-      case 'agent_removed':
-      case 'agent:removed':
-        const agentId = msg.agentId || msg.id;
-        if (this.agents.has(agentId)) {
-          this.agents.delete(agentId);
-          this.emit('agent:removed', { id: agentId });
+      case 'session:deleted':
+        if (payload?.sessionKey) {
+          const agentId = `${gatewayId}:${payload.sessionKey}`;
+          if (this.agents.has(agentId)) {
+            this.agents.delete(agentId);
+            this.emit('agent:removed', { id: agentId });
+          }
         }
         break;
 
-      case 'session_update':
-      case 'session:update':
-        // Session activity update
-        this._updateAgentSession(msg);
+      case 'agent:update':
+        this._updateAgent(gatewayId, payload);
         break;
 
-      case 'pong':
-      case 'health':
-        // Health response
-        this._updateGatewayStatus(gatewayId, 'online');
-        gateway.healthChecks.success++;
+      case 'agent:removed':
+        if (payload?.id) {
+          this.agents.delete(payload.id);
+          this.emit('agent:removed', payload);
+        }
+        break;
+
+      case 'chat':
+      case 'chat:chunk':
+      case 'chat:done':
+        // Chat events - forward to UI
+        this.emit('chat:event', { gatewayId, event, payload });
+        break;
+
+      case 'shutdown':
+        console.log(`Gateway ${gateway.name} shutting down: ${payload?.reason}`);
+        this._updateGatewayStatus(gatewayId, 'disconnected');
         break;
 
       default:
-        // Unknown message type - log for debugging
-        console.log(`Unknown message from ${gateway.name}:`, msg.type);
+        // Log unknown events for debugging
+        console.log(`Event from ${gateway.name}: ${event}`);
     }
   }
 
   /**
-   * Update all agents from a gateway
+   * Update sessions from gateway as agents
    */
-  _updateAgentsFromGateway(gatewayId, agentList) {
+  _updateSessionsFromGateway(gatewayId, sessions) {
     const gateway = this.gateways.get(gatewayId);
     if (!gateway) return;
 
-    // Track which agents we've seen
     const seenAgentIds = new Set();
 
-    for (const agentData of agentList) {
-      const agent = this._normalizeAgent(gatewayId, agentData);
+    for (const session of sessions) {
+      const agent = this._sessionToAgent(gatewayId, session);
       seenAgentIds.add(agent.id);
       
       const existing = this.agents.get(agent.id);
@@ -298,7 +443,7 @@ class GatewayManager extends EventEmitter {
       }
     }
 
-    // Remove agents that no longer exist on this gateway
+    // Remove agents that no longer exist
     for (const [agentId, agent] of this.agents) {
       if (agent.gatewayId === gatewayId && !seenAgentIds.has(agentId)) {
         this.agents.delete(agentId);
@@ -306,8 +451,43 @@ class GatewayManager extends EventEmitter {
       }
     }
 
-    // Update gateway agent count
     gateway.agents = Array.from(seenAgentIds);
+  }
+
+  /**
+   * Update a single session as agent
+   */
+  _updateSession(gatewayId, sessionData) {
+    if (!sessionData) return;
+    
+    const agent = this._sessionToAgent(gatewayId, sessionData);
+    this.agents.set(agent.id, agent);
+    this.emit('agent:update', agent);
+
+    const gateway = this.gateways.get(gatewayId);
+    if (gateway && !gateway.agents.includes(agent.id)) {
+      gateway.agents.push(agent.id);
+    }
+  }
+
+  /**
+   * Convert session data to agent format
+   */
+  _sessionToAgent(gatewayId, session) {
+    return {
+      id: `${gatewayId}:${session.sessionKey || session.key || session.id}`,
+      gatewayId,
+      sessionKey: session.sessionKey || session.key || session.id,
+      name: session.label || session.agentId || session.sessionKey || 'Session',
+      agentId: session.agentId,
+      status: session.status || (session.active ? 'active' : 'idle'),
+      channel: session.channel,
+      model: session.model,
+      lastActive: session.lastActiveAt || session.updatedAt || null,
+      createdAt: session.createdAt,
+      messageCount: session.messageCount || 0,
+      metadata: session.metadata || {}
+    };
   }
 
   /**
@@ -320,23 +500,9 @@ class GatewayManager extends EventEmitter {
     this.agents.set(agent.id, agent);
     this.emit('agent:update', agent);
 
-    // Update gateway agent list
     const gateway = this.gateways.get(gatewayId);
     if (gateway && !gateway.agents.includes(agent.id)) {
       gateway.agents.push(agent.id);
-    }
-  }
-
-  /**
-   * Update agent session info
-   */
-  _updateAgentSession(msg) {
-    const agent = this.agents.get(msg.agentId);
-    if (agent) {
-      agent.currentSession = msg.session || msg.sessionId;
-      agent.status = msg.status || agent.status;
-      agent.lastActive = new Date().toISOString();
-      this.emit('agent:update', agent);
     }
   }
 
@@ -345,7 +511,7 @@ class GatewayManager extends EventEmitter {
    */
   _normalizeAgent(gatewayId, data) {
     return {
-      id: data.id || data.agentId || `agent-${Date.now().toString(36)}`,
+      id: data.id || `${gatewayId}:${data.agentId || Date.now().toString(36)}`,
       gatewayId,
       name: data.name || data.label || data.id || 'Unknown Agent',
       status: data.status || 'idle',
@@ -357,7 +523,7 @@ class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Send message to gateway
+   * Send message to gateway (fire and forget)
    */
   _sendToGateway(id, msg) {
     const ws = this.connections.get(id);
@@ -376,6 +542,16 @@ class GatewayManager extends EventEmitter {
     if (ws) {
       ws.close();
       this.connections.delete(id);
+    }
+    
+    // Clear pending requests
+    const pending = this.pendingRequests.get(id);
+    if (pending) {
+      for (const [reqId, req] of pending) {
+        clearTimeout(req.timeout);
+        req.reject(new Error('Disconnected'));
+      }
+      this.pendingRequests.delete(id);
     }
   }
 
@@ -406,11 +582,16 @@ class GatewayManager extends EventEmitter {
         return;
       }
 
-      // Try WebSocket ping first
-      if (!this._sendToGateway(id, { type: 'ping' })) {
-        // WebSocket not connected, try HTTP health check
-        this._httpHealthCheck(id);
-      }
+      // Use protocol ping request
+      this._sendRequest(id, 'ping', {}, 5000)
+        .then(() => {
+          this._updateGatewayStatus(id, 'online');
+          if (gateway?.healthChecks) gateway.healthChecks.success++;
+        })
+        .catch(() => {
+          // Try HTTP health check as fallback
+          this._httpHealthCheck(id);
+        });
     }, HEALTH_INTERVAL);
 
     this.healthTimers.set(id, timer);
@@ -451,9 +632,10 @@ class GatewayManager extends EventEmitter {
       });
       clearTimeout(timeout);
 
+      const currentGateway = this.gateways.get(id);
       if (response.ok) {
         this._updateGatewayStatus(id, 'online');
-        gateway.healthChecks.success++;
+        if (currentGateway?.healthChecks) currentGateway.healthChecks.success++;
         
         // Try to reconnect WebSocket if needed
         if (!this.connections.has(id) || this.connections.get(id).readyState !== WebSocket.OPEN) {
@@ -461,11 +643,12 @@ class GatewayManager extends EventEmitter {
         }
       } else {
         this._updateGatewayStatus(id, 'error', `HTTP ${response.status}`);
-        gateway.healthChecks.failure++;
+        if (currentGateway?.healthChecks) currentGateway.healthChecks.failure++;
       }
     } catch (err) {
       this._updateGatewayStatus(id, 'offline', err.message);
-      gateway.healthChecks.failure++;
+      const currentGateway = this.gateways.get(id);
+      if (currentGateway?.healthChecks) currentGateway.healthChecks.failure++;
     }
   }
 
@@ -502,14 +685,12 @@ class GatewayManager extends EventEmitter {
 
     this.discoverySocket.bind(DISCOVERY_PORT, () => {
       this.discoverySocket.setBroadcast(true);
-      // Send discovery request
       this._sendDiscoveryRequest();
     });
 
-    // Periodic discovery requests
     this._discoveryInterval = setInterval(() => {
       this._sendDiscoveryRequest();
-    }, 30000); // Every 30 seconds
+    }, 30000);
   }
 
   /**
@@ -521,12 +702,11 @@ class GatewayManager extends EventEmitter {
     const msg = JSON.stringify({ type: 'clawdbot-gateway-discovery' });
     const buf = Buffer.from(msg);
     
-    // Broadcast to common local network ranges
     const broadcastAddrs = ['255.255.255.255', '192.168.1.255', '192.168.0.255', '10.0.0.255'];
     for (const addr of broadcastAddrs) {
       this.discoverySocket.send(buf, 0, buf.length, DISCOVERY_PORT, addr, (err) => {
         if (err && !err.message.includes('ENETUNREACH')) {
-          // console.error('Discovery broadcast error:', err.message);
+          // Ignore unreachable errors
         }
       });
     }
@@ -555,7 +735,6 @@ class GatewayManager extends EventEmitter {
     
     for (const name of Object.keys(interfaces)) {
       for (const iface of interfaces[name]) {
-        // Skip internal and non-IPv4 addresses
         if (iface.internal || iface.family !== 'IPv4') continue;
         ips.push(iface.address);
       }
@@ -610,16 +789,12 @@ class GatewayManager extends EventEmitter {
   init() {
     console.log('🚀 Initializing Gateway Manager...');
     
-    // Connect to all saved gateways
     for (const [id] of this.gateways) {
       this._connectToGateway(id);
       this._startHealthCheck(id);
     }
 
-    // Start network discovery
     this.startDiscovery();
-
-    // Try to find local gateway
     this.discoverLocal();
   }
 

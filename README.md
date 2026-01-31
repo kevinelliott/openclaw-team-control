@@ -22,7 +22,7 @@ npm run setup
 npm run dev
 ```
 
-Open http://localhost:3335 (or http://localhost:3334 for production build)
+Open http://localhost:3335 (or http://localhost:3335 for production build)
 
 ## Gateway Discovery
 
@@ -36,12 +36,12 @@ Team Control uses **polling** to monitor gateways (not the other way around):
 
 ```bash
 # Example: Add local gateway
-curl -X POST http://localhost:3334/api/gateways \
+curl -X POST http://localhost:3335/api/gateways \
   -H 'Content-Type: application/json' \
   -d '{"url":"http://localhost:18789","name":"My Gateway"}'
 
 # Example: Add with auth token
-curl -X POST http://localhost:3334/api/gateways \
+curl -X POST http://localhost:3335/api/gateways \
   -H 'Content-Type: application/json' \
   -d '{"url":"http://localhost:18789","name":"Prod","token":"secret"}'
 ```
