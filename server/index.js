@@ -186,9 +186,26 @@ process.on('SIGTERM', () => {
   server.close(() => process.exit(0));
 });
 
+// Get LAN IP for display
+function getLanIP() {
+  const os = require('os');
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.internal || iface.family !== 'IPv4') continue;
+      return iface.address;
+    }
+  }
+  return 'localhost';
+}
+
 // Start server and initialize gateway manager
 const PORT = process.env.PORT || 3334;
-server.listen(PORT, () => {
-  console.log(`🚀 Team Control running on http://localhost:${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0';
+server.listen(PORT, HOST, () => {
+  const lanIP = getLanIP();
+  console.log(`🚀 Team Control running on:`);
+  console.log(`   Local:   http://localhost:${PORT}`);
+  console.log(`   Network: http://${lanIP}:${PORT}`);
   gatewayManager.init();
 });

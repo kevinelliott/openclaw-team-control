@@ -11,6 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const WebSocket = require('ws');
 const dgram = require('dgram');
 const EventEmitter = require('events');
@@ -546,12 +547,32 @@ class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Try to discover local gateway
+   * Get local LAN IP addresses
+   */
+  _getLocalIPs() {
+    const ips = ['localhost', '127.0.0.1'];
+    const interfaces = os.networkInterfaces();
+    
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        // Skip internal and non-IPv4 addresses
+        if (iface.internal || iface.family !== 'IPv4') continue;
+        ips.push(iface.address);
+      }
+    }
+    
+    return ips;
+  }
+
+  /**
+   * Try to discover local and LAN gateways
    */
   async discoverLocal() {
     const commonPorts = [18789, 3000, 8080];
-    const hosts = ['localhost', '127.0.0.1'];
+    const hosts = this._getLocalIPs();
     const discovered = [];
+
+    console.log(`🔍 Scanning for gateways on: ${hosts.join(', ')}`);
 
     for (const host of hosts) {
       for (const port of commonPorts) {
@@ -565,10 +586,10 @@ class GatewayManager extends EventEmitter {
           if (response.ok) {
             const data = await response.json();
             if (data.type === 'clawdbot' || data.gateway) {
-              console.log(`🔍 Found local gateway at ${url}`);
+              console.log(`🔍 Found gateway at ${url}`);
               const gw = this.addGateway({
                 url,
-                name: data.name || `Local Gateway (${port})`,
+                name: data.name || `Gateway @ ${host}:${port}`,
                 autoDiscovered: true
               });
               discovered.push(gw);
