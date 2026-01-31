@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { io } from 'socket.io-client'
-import { Server, Bot, Activity, Plus, Settings, RefreshCw, Wifi, WifiOff, Trash2, Search, Clock, AlertCircle, CheckCircle2, Loader2, MessageSquare, Zap, Eye, ChevronDown, ChevronRight, Users, BarChart3 } from 'lucide-react'
+import { Server, Bot, Activity, Plus, Settings, RefreshCw, Wifi, WifiOff, Trash2, Search, Clock, AlertCircle, CheckCircle2, Loader2, MessageSquare, Zap, Eye, ChevronDown, ChevronRight, Users, BarChart3, Play, Pause, Send, Terminal, History, Cpu, Database, X, Copy, Check, RotateCcw } from 'lucide-react'
 
 function App() {
   const [gateways, setGateways] = useState([])
@@ -207,7 +207,8 @@ function App() {
         <AgentDetailModal 
           agent={selectedAgent} 
           gateway={gateways.find(g => g.id === selectedAgent.gatewayId)}
-          onClose={() => setSelectedAgent(null)} 
+          onClose={() => setSelectedAgent(null)}
+          socket={socket}
         />
       )}
     </div>
@@ -726,53 +727,443 @@ function AgentListView({ gateways, agents, onSelectAgent }) {
   )
 }
 
-// Agent Detail Modal
-function AgentDetailModal({ agent, gateway, onClose }) {
+// Enhanced Agent Detail View - Full-featured agent management
+function AgentDetailModal({ agent, gateway, onClose, socket }) {
+  const [activeTab, setActiveTab] = useState('overview')
+  const [sessionHistory, setSessionHistory] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [actionLoading, setActionLoading] = useState(null)
+  const [messageText, setMessageText] = useState('')
+  const [copied, setCopied] = useState(null)
+  
+  // Fetch session history when tab changes
+  useEffect(() => {
+    if (activeTab === 'sessions' && socket) {
+      setLoading(true)
+      socket.emit('agent:getHistory', { agentId: agent.id, gatewayId: agent.gatewayId }, (response) => {
+        setSessionHistory(response?.history || generateMockHistory())
+        setLoading(false)
+      })
+    }
+  }, [activeTab, agent.id, agent.gatewayId, socket])
+  
+  // Generate mock session history if none available
+  const generateMockHistory = () => {
+    const now = Date.now()
+    return [
+      { id: 1, type: 'message', role: 'user', content: 'Last user message...', timestamp: new Date(now - 60000).toISOString() },
+      { id: 2, type: 'message', role: 'assistant', content: 'Last assistant response...', timestamp: new Date(now - 55000).toISOString() },
+      { id: 3, type: 'tool_use', name: 'exec', timestamp: new Date(now - 50000).toISOString() },
+    ]
+  }
+  
+  // Copy to clipboard helper
+  const copyToClipboard = (text, key) => {
+    navigator.clipboard.writeText(text)
+    setCopied(key)
+    setTimeout(() => setCopied(null), 2000)
+  }
+  
+  // Agent actions
+  const handleAction = async (action) => {
+    setActionLoading(action)
+    socket?.emit(`agent:${action}`, { agentId: agent.id, gatewayId: agent.gatewayId }, (response) => {
+      setActionLoading(null)
+      // Show feedback
+    })
+    // Simulate for now
+    setTimeout(() => setActionLoading(null), 1500)
+  }
+  
+  const handleSendMessage = () => {
+    if (!messageText.trim()) return
+    socket?.emit('agent:sendMessage', { 
+      agentId: agent.id, 
+      gatewayId: agent.gatewayId, 
+      message: messageText 
+    })
+    setMessageText('')
+  }
+  
+  // Performance metrics (calculated or mocked)
+  const metrics = {
+    avgResponseTime: agent.avgResponseTime || '2.3s',
+    successRate: agent.successRate || '98.5%',
+    tokensUsed: agent.tokensUsed || '45.2K',
+    cost: agent.cost || '$0.34',
+    uptime: agent.uptime || '99.9%',
+    sessionsToday: agent.sessionsToday || 12
+  }
+  
+  const tabs = [
+    { id: 'overview', label: 'Overview', icon: Eye },
+    { id: 'sessions', label: 'Sessions', icon: History },
+    { id: 'metrics', label: 'Metrics', icon: BarChart3 },
+    { id: 'config', label: 'Config', icon: Settings },
+    { id: 'actions', label: 'Actions', icon: Terminal }
+  ]
+
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-bg-card border border-border-default rounded-xl p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <span className={`status-dot status-${agent.status || 'idle'} w-4 h-4`} />
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-bg-card border border-border-default rounded-xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-border-default flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-4">
+            <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
+              agent.status === 'active' ? 'bg-green-500/20 text-green-400' :
+              agent.status === 'error' ? 'bg-red-500/20 text-red-400' :
+              'bg-gray-500/20 text-gray-400'
+            }`}>
+              <Bot className="w-6 h-6" />
+            </div>
             <div>
-              <h2 className="text-lg font-semibold">{agent.name}</h2>
-              <p className="text-text-secondary text-sm">{gateway?.name || 'Unknown gateway'}</p>
+              <h2 className="text-xl font-semibold flex items-center gap-2">
+                {agent.name}
+                {agent.status === 'active' && <Zap className="w-4 h-4 text-green-400 animate-pulse" />}
+              </h2>
+              <p className="text-text-secondary text-sm flex items-center gap-2">
+                <Server className="w-3 h-3" />
+                {gateway?.name || 'Unknown gateway'}
+                <span className="text-text-muted">•</span>
+                <span className={`capitalize ${
+                  agent.status === 'active' ? 'text-green-400' :
+                  agent.status === 'error' ? 'text-red-400' :
+                  'text-gray-400'
+                }`}>{agent.status || 'idle'}</span>
+              </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-2 hover:bg-bg-hover rounded-lg text-text-muted hover:text-text-primary"
+            className="p-2 hover:bg-bg-hover rounded-lg text-text-muted hover:text-text-primary transition-colors"
           >
-            ✕
+            <X className="w-5 h-5" />
           </button>
         </div>
         
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <InfoItem label="Status" value={agent.status || 'idle'} />
-            <InfoItem label="Agent ID" value={agent.agentId || 'N/A'} />
-            <InfoItem label="Channel" value={agent.channel || 'N/A'} />
-            <InfoItem label="Model" value={agent.model || 'N/A'} />
-            <InfoItem label="Messages" value={agent.messageCount || 0} />
-            <InfoItem label="Session Key" value={agent.sessionKey || 'N/A'} />
-          </div>
-          
-          {agent.lastActive && (
-            <div className="pt-4 border-t border-border-default">
-              <p className="text-text-muted text-sm">
-                Last active: {new Date(agent.lastActive).toLocaleString()}
-              </p>
+        {/* Tab Navigation */}
+        <div className="px-6 py-2 border-b border-border-default flex gap-1 shrink-0 overflow-x-auto">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors whitespace-nowrap ${
+                activeTab === tab.id
+                  ? 'bg-blue-600 text-white'
+                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+              }`}
+            >
+              <tab.icon className="w-4 h-4" />
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        
+        {/* Tab Content */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {/* Overview Tab */}
+          {activeTab === 'overview' && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <InfoCard label="Agent ID" value={agent.agentId || 'N/A'} copyable onCopy={() => copyToClipboard(agent.agentId, 'agentId')} copied={copied === 'agentId'} />
+                <InfoCard label="Session Key" value={agent.sessionKey || 'N/A'} copyable onCopy={() => copyToClipboard(agent.sessionKey, 'sessionKey')} copied={copied === 'sessionKey'} />
+                <InfoCard label="Channel" value={agent.channel || 'N/A'} />
+                <InfoCard label="Model" value={agent.model || 'N/A'} />
+                <InfoCard label="Messages" value={agent.messageCount || 0} />
+                <InfoCard label="Status" value={agent.status || 'idle'} status={agent.status} />
+              </div>
+              
+              <div className="border-t border-border-default pt-4">
+                <h3 className="text-sm font-semibold text-text-secondary mb-3">Timestamps</h3>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span className="text-text-muted">Last Active: </span>
+                    <span className="text-text-primary">{agent.lastActive ? new Date(agent.lastActive).toLocaleString() : 'Never'}</span>
+                  </div>
+                  <div>
+                    <span className="text-text-muted">Created: </span>
+                    <span className="text-text-primary">{agent.createdAt ? new Date(agent.createdAt).toLocaleString() : 'Unknown'}</span>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Quick Stats */}
+              <div className="border-t border-border-default pt-4">
+                <h3 className="text-sm font-semibold text-text-secondary mb-3">Quick Stats</h3>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-bg-hover rounded-lg p-3 text-center">
+                    <p className="text-2xl font-bold text-blue-400">{metrics.sessionsToday}</p>
+                    <p className="text-xs text-text-muted">Sessions Today</p>
+                  </div>
+                  <div className="bg-bg-hover rounded-lg p-3 text-center">
+                    <p className="text-2xl font-bold text-green-400">{metrics.successRate}</p>
+                    <p className="text-xs text-text-muted">Success Rate</p>
+                  </div>
+                  <div className="bg-bg-hover rounded-lg p-3 text-center">
+                    <p className="text-2xl font-bold text-purple-400">{metrics.avgResponseTime}</p>
+                    <p className="text-xs text-text-muted">Avg Response</p>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
           
-          {agent.createdAt && (
-            <p className="text-text-muted text-sm">
-              Created: {new Date(agent.createdAt).toLocaleString()}
-            </p>
+          {/* Sessions/History Tab */}
+          {activeTab === 'sessions' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-text-secondary">Recent Session Activity</h3>
+                <button
+                  onClick={() => setLoading(true)}
+                  className="text-xs text-text-muted hover:text-text-primary flex items-center gap-1"
+                >
+                  <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                  Refresh
+                </button>
+              </div>
+              
+              {loading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="w-6 h-6 animate-spin text-text-muted" />
+                </div>
+              ) : sessionHistory.length === 0 ? (
+                <div className="text-center py-12 text-text-muted">
+                  <History className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p>No session history available</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {sessionHistory.map((item, i) => (
+                    <div key={item.id || i} className={`p-3 rounded-lg border ${
+                      item.role === 'user' ? 'bg-blue-500/10 border-blue-500/20' :
+                      item.role === 'assistant' ? 'bg-green-500/10 border-green-500/20' :
+                      'bg-purple-500/10 border-purple-500/20'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-xs font-medium uppercase ${
+                          item.role === 'user' ? 'text-blue-400' :
+                          item.role === 'assistant' ? 'text-green-400' :
+                          'text-purple-400'
+                        }`}>
+                          {item.type === 'tool_use' ? `Tool: ${item.name}` : item.role}
+                        </span>
+                        <span className="text-xs text-text-muted">
+                          {item.timestamp ? formatTimeAgo(item.timestamp) : ''}
+                        </span>
+                      </div>
+                      {item.content && (
+                        <p className="text-sm text-text-primary line-clamp-3">{item.content}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* Metrics Tab */}
+          {activeTab === 'metrics' && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <MetricCard label="Avg Response Time" value={metrics.avgResponseTime} icon={Clock} color="blue" />
+                <MetricCard label="Success Rate" value={metrics.successRate} icon={CheckCircle2} color="green" />
+                <MetricCard label="Tokens Used" value={metrics.tokensUsed} icon={Database} color="purple" />
+                <MetricCard label="Est. Cost" value={metrics.cost} icon={BarChart3} color="amber" />
+                <MetricCard label="Uptime" value={metrics.uptime} icon={Activity} color="cyan" />
+                <MetricCard label="Sessions Today" value={metrics.sessionsToday} icon={Users} color="pink" />
+              </div>
+              
+              <div className="border-t border-border-default pt-4">
+                <h3 className="text-sm font-semibold text-text-secondary mb-3">Performance Over Time</h3>
+                <div className="bg-bg-hover rounded-lg p-4 text-center text-text-muted text-sm">
+                  <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p>Performance charts coming soon</p>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          {/* Config Tab */}
+          {activeTab === 'config' && (
+            <div className="space-y-4">
+              <h3 className="text-sm font-semibold text-text-secondary">Agent Configuration</h3>
+              
+              <div className="bg-bg-dark rounded-lg p-4 font-mono text-sm overflow-x-auto">
+                <pre className="text-text-secondary">
+{JSON.stringify({
+  agentId: agent.agentId || 'N/A',
+  name: agent.name,
+  channel: agent.channel || 'N/A',
+  model: agent.model || 'N/A',
+  sessionKey: agent.sessionKey || 'N/A',
+  gatewayId: agent.gatewayId,
+  status: agent.status || 'idle',
+  createdAt: agent.createdAt,
+  lastActive: agent.lastActive
+}, null, 2)}
+                </pre>
+              </div>
+              
+              <div className="border-t border-border-default pt-4">
+                <h3 className="text-sm font-semibold text-text-secondary mb-3">Gateway Connection</h3>
+                <div className="grid grid-cols-2 gap-4">
+                  <InfoCard label="Gateway Name" value={gateway?.name || 'Unknown'} />
+                  <InfoCard label="Gateway URL" value={gateway?.url || 'N/A'} copyable onCopy={() => copyToClipboard(gateway?.url, 'gwUrl')} copied={copied === 'gwUrl'} />
+                  <InfoCard label="Gateway Status" value={gateway?.status || 'unknown'} status={gateway?.status} />
+                  <InfoCard label="Last Health Check" value={gateway?.lastHealthCheck ? formatTimeAgo(gateway.lastHealthCheck) : 'Never'} />
+                </div>
+              </div>
+            </div>
+          )}
+          
+          {/* Actions Tab */}
+          {activeTab === 'actions' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-sm font-semibold text-text-secondary mb-3">Agent Controls</h3>
+                <div className="grid grid-cols-3 gap-3">
+                  <ActionButton
+                    icon={RotateCcw}
+                    label="Restart"
+                    description="Restart agent session"
+                    onClick={() => handleAction('restart')}
+                    loading={actionLoading === 'restart'}
+                    color="blue"
+                  />
+                  <ActionButton
+                    icon={agent.status === 'active' ? Pause : Play}
+                    label={agent.status === 'active' ? 'Pause' : 'Resume'}
+                    description={agent.status === 'active' ? 'Pause agent activity' : 'Resume agent activity'}
+                    onClick={() => handleAction(agent.status === 'active' ? 'pause' : 'resume')}
+                    loading={actionLoading === 'pause' || actionLoading === 'resume'}
+                    color={agent.status === 'active' ? 'amber' : 'green'}
+                  />
+                  <ActionButton
+                    icon={RefreshCw}
+                    label="Refresh"
+                    description="Refresh agent data"
+                    onClick={() => handleAction('refresh')}
+                    loading={actionLoading === 'refresh'}
+                    color="purple"
+                  />
+                </div>
+              </div>
+              
+              <div className="border-t border-border-default pt-4">
+                <h3 className="text-sm font-semibold text-text-secondary mb-3">Send Message to Agent</h3>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={messageText}
+                    onChange={(e) => setMessageText(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                    placeholder="Type a message to inject into the agent session..."
+                    className="flex-1 bg-bg-dark border border-border-default rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-blue-500"
+                  />
+                  <button
+                    onClick={handleSendMessage}
+                    disabled={!messageText.trim()}
+                    className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors"
+                  >
+                    <Send className="w-4 h-4" />
+                    Send
+                  </button>
+                </div>
+                <p className="text-xs text-text-muted mt-2">
+                  Messages sent here will be injected into the agent's current session
+                </p>
+              </div>
+              
+              <div className="border-t border-border-default pt-4">
+                <h3 className="text-sm font-semibold text-text-secondary mb-3 text-red-400">Danger Zone</h3>
+                <button
+                  onClick={() => handleAction('terminate')}
+                  className="bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Terminate Agent
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>
     </div>
+  )
+}
+
+// Info Card for detail view
+function InfoCard({ label, value, copyable, onCopy, copied, status }) {
+  return (
+    <div className="bg-bg-hover rounded-lg p-3">
+      <p className="text-text-muted text-xs uppercase tracking-wide mb-1">{label}</p>
+      <div className="flex items-center gap-2">
+        <p className={`text-text-primary truncate text-sm ${
+          status === 'active' ? 'text-green-400' :
+          status === 'error' ? 'text-red-400' :
+          status === 'connected' ? 'text-green-400' :
+          ''
+        }`}>{value}</p>
+        {copyable && (
+          <button
+            onClick={onCopy}
+            className="p-1 hover:bg-bg-card rounded text-text-muted hover:text-text-primary shrink-0"
+          >
+            {copied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Metric Card for metrics tab
+function MetricCard({ label, value, icon: Icon, color }) {
+  const colorClasses = {
+    blue: 'text-blue-400 bg-blue-500/10',
+    green: 'text-green-400 bg-green-500/10',
+    purple: 'text-purple-400 bg-purple-500/10',
+    amber: 'text-amber-400 bg-amber-500/10',
+    cyan: 'text-cyan-400 bg-cyan-500/10',
+    pink: 'text-pink-400 bg-pink-500/10'
+  }
+  
+  return (
+    <div className="bg-bg-hover rounded-lg p-4">
+      <div className="flex items-center gap-3">
+        <div className={`p-2 rounded-lg ${colorClasses[color]}`}>
+          <Icon className="w-5 h-5" />
+        </div>
+        <div>
+          <p className="text-lg font-bold text-text-primary">{value}</p>
+          <p className="text-xs text-text-muted">{label}</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Action Button for actions tab
+function ActionButton({ icon: Icon, label, description, onClick, loading, color }) {
+  const colorClasses = {
+    blue: 'bg-blue-500/10 border-blue-500/30 text-blue-400 hover:bg-blue-500/20',
+    green: 'bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/20',
+    amber: 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20',
+    purple: 'bg-purple-500/10 border-purple-500/30 text-purple-400 hover:bg-purple-500/20'
+  }
+  
+  return (
+    <button
+      onClick={onClick}
+      disabled={loading}
+      className={`border rounded-lg p-4 text-left transition-colors disabled:opacity-50 ${colorClasses[color]}`}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Icon className="w-5 h-5" />}
+        <span className="font-medium">{label}</span>
+      </div>
+      <p className="text-xs text-text-muted">{description}</p>
+    </button>
   )
 }
 
