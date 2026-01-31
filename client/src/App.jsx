@@ -7,6 +7,7 @@ function App() {
   const [agents, setAgents] = useState([])
   const [connected, setConnected] = useState(false)
   const [showAddGateway, setShowAddGateway] = useState(false)
+  const [editingGateway, setEditingGateway] = useState(null)
   const [discovering, setDiscovering] = useState(false)
   const [activityLog, setActivityLog] = useState([])
   const [selectedAgent, setSelectedAgent] = useState(null)
@@ -150,6 +151,11 @@ function App() {
     await fetch(`/api/gateways/${id}`, { method: 'DELETE' })
   }
 
+  const updateGateway = async (id, data) => {
+    socket.emit('gateway:update', { id, ...data })
+    setEditingGateway(null)
+  }
+
   const discoverGateways = () => {
     setDiscovering(true)
     socket.emit('discover')
@@ -157,25 +163,7 @@ function App() {
     setTimeout(() => setDiscovering(false), 10000)
   }
 
-  const refresh = async () => {
-    // Try socket first
-    socket.emit('refresh')
-    // Also fetch via REST as fallback
-    try {
-      const [gwRes, agRes] = await Promise.all([
-        fetch('/api/gateways'),
-        fetch('/api/agents')
-      ])
-      const gateways = await gwRes.json()
-      const agents = await agRes.json()
-      if (gateways.length > 0 || agents.length > 0) {
-        setGateways(gateways)
-        setAgents(agents)
-      }
-    } catch (e) {
-      console.error('REST refresh failed:', e)
-    }
-  }
+  const refresh = () => socket.emit('refresh')
 
   return (
     <div className="min-h-screen flex flex-col bg-bg-dark">
@@ -204,6 +192,7 @@ function App() {
                   gateways={gateways} 
                   agents={agents} 
                   onRemove={removeGateway}
+                  onEdit={setEditingGateway}
                   onSelectAgent={setSelectedAgent}
                 />
               ) : (
@@ -220,6 +209,13 @@ function App() {
       </div>
       {showAddGateway && (
         <AddGatewayModal onClose={() => setShowAddGateway(false)} onSubmit={addGateway} />
+      )}
+      {editingGateway && (
+        <EditGatewayModal 
+          gateway={editingGateway} 
+          onClose={() => setEditingGateway(null)} 
+          onSubmit={(data) => updateGateway(editingGateway.id, data)} 
+        />
       )}
       {selectedAgent && (
         <AgentDetailModal 
@@ -374,7 +370,7 @@ function StatCard({ label, value, icon, color, subtitle }) {
   )
 }
 
-function GatewayGrid({ gateways, agents, onRemove, onSelectAgent }) {
+function GatewayGrid({ gateways, agents, onRemove, onEdit, onSelectAgent }) {
   return (
     <div className="space-y-6">
       {gateways.map(gw => (
@@ -383,6 +379,7 @@ function GatewayGrid({ gateways, agents, onRemove, onSelectAgent }) {
           gateway={gw} 
           agents={agents.filter(a => a.gatewayId === gw.id)} 
           onRemove={() => onRemove(gw.id)}
+          onEdit={() => onEdit(gw)}
           onSelectAgent={onSelectAgent}
         />
       ))}
@@ -405,7 +402,7 @@ function GatewayStatusIcon({ status }) {
   }
 }
 
-function GatewayCard({ gateway, agents, onRemove, onSelectAgent }) {
+function GatewayCard({ gateway, agents, onRemove, onEdit, onSelectAgent }) {
   const [expanded, setExpanded] = useState(true)
   
   const statusColors = {
@@ -439,14 +436,13 @@ function GatewayCard({ gateway, agents, onRemove, onSelectAgent }) {
                 <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">Auth</span>
               )}
             </div>
-            <p className="text-text-secondary text-sm">{gateway.url}</p>
           </div>
         </div>
         <div className="flex items-center gap-4">
           {gateway.lastSeen && (
             <div className="flex items-center gap-1 text-text-muted text-xs">
               <Clock className="w-3 h-3" />
-              <span>Last seen: {formatTimeAgo(gateway.lastSeen)}</span>
+              <span>{formatTimeAgo(gateway.lastSeen)}</span>
             </div>
           )}
           {gateway.lastError && (
@@ -459,6 +455,13 @@ function GatewayCard({ gateway, agents, onRemove, onSelectAgent }) {
               <span className="text-green-400">({activeAgents} active)</span>
             )}
           </div>
+          <button 
+            onClick={onEdit}
+            className="p-2 text-text-muted hover:text-blue-400 hover:bg-blue-500/10 rounded-lg transition-colors"
+            title="Edit gateway"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
           <button 
             onClick={onRemove}
             className="p-2 text-text-muted hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
@@ -668,6 +671,68 @@ function AddGatewayModal({ onClose, onSubmit }) {
               className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
             >
               Connect
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+function EditGatewayModal({ gateway, onClose, onSubmit }) {
+  const [name, setName] = useState(gateway.name || '')
+  const [token, setToken] = useState('')
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    onSubmit({ name: name.trim(), token: token.trim() || undefined })
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-bg-card border border-border-default rounded-xl p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
+        <h2 className="text-lg font-semibold mb-4">Edit Gateway</h2>
+        <form onSubmit={handleSubmit}>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm text-text-secondary mb-1">Gateway URL</label>
+              <p className="text-text-muted text-sm bg-bg-dark border border-border-default rounded-lg px-3 py-2">{gateway.url}</p>
+            </div>
+            <div>
+              <label className="block text-sm text-text-secondary mb-1">Display Name</label>
+              <input 
+                value={name} 
+                onChange={e => setName(e.target.value)} 
+                placeholder="Production Server" 
+                className="w-full bg-bg-dark border border-border-default rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500" 
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-text-secondary mb-1">Auth Token</label>
+              <input 
+                type="password" 
+                value={token} 
+                onChange={e => setToken(e.target.value)} 
+                placeholder="Leave blank to keep current" 
+                className="w-full bg-bg-dark border border-border-default rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500" 
+              />
+              <p className="text-text-muted text-xs mt-1">Leave empty to keep existing token</p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 mt-6">
+            <button 
+              type="button"
+              onClick={onClose} 
+              className="px-4 py-2 text-sm text-text-secondary hover:text-text-primary transition-colors"
+            >
+              Cancel
+            </button>
+            <button 
+              type="submit"
+              className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+            >
+              Save
             </button>
           </div>
         </form>

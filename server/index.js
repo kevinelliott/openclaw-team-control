@@ -164,6 +164,13 @@ io.on('connection', (socket) => {
     socket.emit('discovery:complete', { discovered: discovered.length, gateways: discovered });
   });
 
+  socket.on('gateway:update', ({ id, name, token }) => {
+    const success = gatewayManager.updateGateway(id, { name, token });
+    if (success) {
+      console.log(`✏️ Gateway ${id} updated`);
+    }
+  });
+
   // Agent actions - get session history
   socket.on('agent:getHistory', async ({ agentId, gatewayId }, callback) => {
     if (typeof callback !== 'function') return;

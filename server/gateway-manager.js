@@ -154,6 +154,37 @@ class GatewayManager extends EventEmitter {
   }
 
   /**
+   * Update a gateway's settings
+   */
+  updateGateway(id, { name, token }) {
+    const gateway = this.gateways.get(id);
+    if (!gateway) return false;
+
+    let changed = false;
+    
+    if (name && name !== gateway.name) {
+      gateway.name = name;
+      changed = true;
+    }
+    
+    if (token) {
+      gateway.token = token;
+      changed = true;
+      // Reconnect with new token
+      this._disconnectGateway(id);
+      this._connectToGateway(id);
+    }
+    
+    if (changed) {
+      this._saveGateways();
+      this.emit('gateway:update', this._sanitizeGateway(gateway));
+      console.log(`✏️ Updated gateway: ${gateway.name}`);
+    }
+    
+    return true;
+  }
+
+  /**
    * Get all gateways (sanitized - no tokens)
    */
   getGateways() {
