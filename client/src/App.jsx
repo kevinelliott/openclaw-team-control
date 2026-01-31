@@ -1,8 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { io } from 'socket.io-client'
 import { Server, Bot, Activity, Plus, Settings, RefreshCw, Wifi, WifiOff, Trash2, Search, Clock, AlertCircle, CheckCircle2, Loader2, MessageSquare, Zap, Eye, ChevronDown, ChevronRight, Users, BarChart3 } from 'lucide-react'
-
-const socket = io({ autoConnect: true })
 
 function App() {
   const [gateways, setGateways] = useState([])
@@ -13,6 +11,20 @@ function App() {
   const [activityLog, setActivityLog] = useState([])
   const [selectedAgent, setSelectedAgent] = useState(null)
   const [viewMode, setViewMode] = useState('grid') // 'grid' or 'list'
+  
+  // Stable socket reference - only create once
+  const socketRef = useRef(null)
+  if (!socketRef.current) {
+    socketRef.current = io({
+      autoConnect: false,
+      transports: ['websocket'],  // Skip polling, go straight to websocket
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: Infinity
+    })
+  }
+  const socket = socketRef.current
 
   // Add activity log entry
   const addActivity = useCallback((type, message, data = {}) => {
@@ -26,14 +38,22 @@ function App() {
   }, [])
 
   useEffect(() => {
-    socket.on('connect', () => {
+    // Connect on mount
+    if (!socket.connected) {
+      socket.connect()
+    }
+    
+    const onConnect = () => {
       setConnected(true)
       addActivity('system', 'Connected to Team Control server')
-    })
-    socket.on('disconnect', () => {
+    }
+    const onDisconnect = () => {
       setConnected(false)
       addActivity('warning', 'Disconnected from server')
-    })
+    }
+    
+    socket.on('connect', onConnect)
+    socket.on('disconnect', onDisconnect)
     
     socket.on('sync', (data) => {
       setGateways(data.gateways || [])
@@ -93,15 +113,17 @@ function App() {
       addActivity('discovery', `Discovery complete: ${discovered} gateways found`)
     })
 
-    socket.on('chat:event', ({ gatewayId, event, payload }) => {
+    const onChatEvent = ({ gatewayId, event, payload }) => {
       if (event === 'chat' || event === 'chat:done') {
         addActivity('chat', `Message in ${payload?.sessionKey || 'session'}`, { event, payload })
       }
-    })
+    }
+    
+    socket.on('chat:event', onChatEvent)
     
     return () => {
-      socket.off('connect')
-      socket.off('disconnect')
+      socket.off('connect', onConnect)
+      socket.off('disconnect', onDisconnect)
       socket.off('sync')
       socket.off('gateway:added')
       socket.off('gateway:removed')
@@ -109,9 +131,10 @@ function App() {
       socket.off('agent:update')
       socket.off('agent:removed')
       socket.off('discovery:complete')
-      socket.off('chat:event')
+      socket.off('chat:event', onChatEvent)
+      // Don't disconnect - socket is reused across StrictMode double-mount
     }
-  }, [addActivity])
+  }, [addActivity, socket])
 
   const addGateway = async (data) => {
     await fetch('/api/gateways', {
