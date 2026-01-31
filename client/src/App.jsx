@@ -290,10 +290,11 @@ function StatsBar({ gateways, agents }) {
   const onlineGateways = gateways.filter(g => g.status === 'online').length
   const activeAgents = agents.filter(a => a.status === 'active').length
   const totalSessions = agents.reduce((acc, a) => acc + (a.sessions?.length || 0), 0)
+  const activeSessions = agents.reduce((acc, a) => acc + (a.sessions?.filter(s => s.status === 'active').length || 0), 0)
   const totalMessages = agents.reduce((acc, a) => acc + (a.messageCount || 0), 0)
   
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
       <StatCard 
         label="Gateways" 
         value={`${onlineGateways}/${gateways.length}`} 
@@ -316,9 +317,16 @@ function StatsBar({ gateways, agents }) {
         subtitle={activeAgents > 0 ? 'Processing' : 'Idle'}
       />
       <StatCard 
+        label="Sessions" 
+        value={`${activeSessions}/${totalSessions}`} 
+        icon={<Users className="w-5 h-5" />} 
+        color="cyan"
+        subtitle={activeSessions > 0 ? `${activeSessions} running` : 'None running'}
+      />
+      <StatCard 
         label="Messages" 
         value={totalMessages} 
-        icon={<RefreshCw className="w-5 h-5" />} 
+        icon={<MessageSquare className="w-5 h-5" />} 
         color="amber"
         subtitle="Total processed"
       />
@@ -331,7 +339,8 @@ function StatCard({ label, value, icon, color, subtitle }) {
     blue: 'from-blue-500/20 to-blue-600/10 text-blue-400',
     purple: 'from-purple-500/20 to-purple-600/10 text-purple-400',
     green: 'from-green-500/20 to-green-600/10 text-green-400',
-    amber: 'from-amber-500/20 to-amber-600/10 text-amber-400'
+    amber: 'from-amber-500/20 to-amber-600/10 text-amber-400',
+    cyan: 'from-cyan-500/20 to-cyan-600/10 text-cyan-400'
   }
   return (
     <div className={`card bg-gradient-to-br ${colors[color]}`}>
@@ -469,6 +478,15 @@ function AgentCard({ agent, onClick }) {
     busy: 'border-amber-500/40 bg-amber-500/10 hover:border-amber-500/60',
     error: 'border-red-500/40 bg-red-500/10 hover:border-red-500/60'
   }
+
+  // Capitalize agent name for display
+  const displayName = agent.name ? 
+    agent.name.charAt(0).toUpperCase() + agent.name.slice(1) : 
+    agent.agentId || agent.id;
+
+  // Count active sessions
+  const activeSessions = agent.sessions?.filter(s => s.status === 'active').length || 0;
+  const totalSessions = agent.sessionCount || agent.sessions?.length || 0;
   
   return (
     <div 
@@ -477,25 +495,38 @@ function AgentCard({ agent, onClick }) {
     >
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2 min-w-0">
-          <span className={`status-dot status-${agent.status || 'idle'} shrink-0`} />
-          <span className="font-medium truncate">{agent.name || agent.id}</span>
+          {/* Avatar */}
+          <span className="text-xl shrink-0" title={agent.agentId || 'Agent'}>
+            {agent.avatar || '🤖'}
+          </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className={`status-dot status-${agent.status || 'idle'} shrink-0`} />
+              <span className="font-medium truncate">{displayName}</span>
+            </div>
+            {agent.agentId && agent.agentId !== agent.name && (
+              <p className="text-text-muted text-xs truncate">{agent.agentId}</p>
+            )}
+          </div>
         </div>
         {agent.status === 'active' && (
           <Zap className="w-3 h-3 text-green-400 shrink-0 animate-pulse" />
         )}
       </div>
       <div className="space-y-1">
-        {agent.channel && (
+        {/* Sessions count */}
+        {totalSessions > 0 && (
           <p className="text-text-muted text-xs flex items-center gap-1">
             <MessageSquare className="w-3 h-3" />
-            {agent.channel}
+            {totalSessions} session{totalSessions !== 1 ? 's' : ''}
+            {activeSessions > 0 && (
+              <span className="text-green-400">({activeSessions} active)</span>
+            )}
           </p>
         )}
-        {agent.model && (
-          <p className="text-text-muted text-xs truncate">{agent.model}</p>
-        )}
-        {agent.messageCount > 0 && (
-          <p className="text-text-muted text-xs">{agent.messageCount} messages</p>
+        {/* Total messages */}
+        {(agent.totalMessages || agent.messageCount) > 0 && (
+          <p className="text-text-muted text-xs">{agent.totalMessages || agent.messageCount} messages</p>
         )}
       </div>
       {agent.lastActive && (
@@ -809,16 +840,16 @@ function AgentDetailModal({ agent, gateway, onClose, socket }) {
         {/* Header */}
         <div className="px-6 py-4 border-b border-border-default flex items-center justify-between shrink-0">
           <div className="flex items-center gap-4">
-            <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
-              agent.status === 'active' ? 'bg-green-500/20 text-green-400' :
-              agent.status === 'error' ? 'bg-red-500/20 text-red-400' :
-              'bg-gray-500/20 text-gray-400'
+            <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${
+              agent.status === 'active' ? 'bg-green-500/20' :
+              agent.status === 'error' ? 'bg-red-500/20' :
+              'bg-gray-500/20'
             }`}>
-              <Bot className="w-6 h-6" />
+              {agent.avatar || '🤖'}
             </div>
             <div>
               <h2 className="text-xl font-semibold flex items-center gap-2">
-                {agent.name}
+                {agent.name ? agent.name.charAt(0).toUpperCase() + agent.name.slice(1) : agent.agentId || 'Agent'}
                 {agent.status === 'active' && <Zap className="w-4 h-4 text-green-400 animate-pulse" />}
               </h2>
               <p className="text-text-secondary text-sm flex items-center gap-2">
@@ -830,6 +861,12 @@ function AgentDetailModal({ agent, gateway, onClose, socket }) {
                   agent.status === 'error' ? 'text-red-400' :
                   'text-gray-400'
                 }`}>{agent.status || 'idle'}</span>
+                {agent.sessionCount > 0 && (
+                  <>
+                    <span className="text-text-muted">•</span>
+                    <span>{agent.sessionCount} session{agent.sessionCount !== 1 ? 's' : ''}</span>
+                  </>
+                )}
               </p>
             </div>
           </div>
@@ -866,10 +903,8 @@ function AgentDetailModal({ agent, gateway, onClose, socket }) {
             <div className="space-y-6">
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                 <InfoCard label="Agent ID" value={agent.agentId || 'N/A'} copyable onCopy={() => copyToClipboard(agent.agentId, 'agentId')} copied={copied === 'agentId'} />
-                <InfoCard label="Session Key" value={agent.sessionKey || 'N/A'} copyable onCopy={() => copyToClipboard(agent.sessionKey, 'sessionKey')} copied={copied === 'sessionKey'} />
-                <InfoCard label="Channel" value={agent.channel || 'N/A'} />
-                <InfoCard label="Model" value={agent.model || 'N/A'} />
-                <InfoCard label="Messages" value={agent.messageCount || 0} />
+                <InfoCard label="Total Sessions" value={agent.sessionCount || agent.sessions?.length || 0} />
+                <InfoCard label="Total Messages" value={agent.totalMessages || agent.messageCount || 0} />
                 <InfoCard label="Status" value={agent.status || 'idle'} status={agent.status} />
               </div>
               
@@ -887,73 +922,166 @@ function AgentDetailModal({ agent, gateway, onClose, socket }) {
                 </div>
               </div>
               
+              {/* Sessions List */}
+              {agent.sessions && agent.sessions.length > 0 && (
+                <div className="border-t border-border-default pt-4">
+                  <h3 className="text-sm font-semibold text-text-secondary mb-3">Active Sessions</h3>
+                  <div className="space-y-2">
+                    {agent.sessions.map((session, idx) => (
+                      <div key={session.sessionKey || idx} className={`bg-bg-hover rounded-lg p-3 border ${
+                        session.status === 'active' ? 'border-green-500/30' : 'border-border-default'
+                      }`}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className={`status-dot status-${session.status || 'idle'}`} />
+                            <span className="font-medium text-sm">{session.label || session.sessionKey}</span>
+                          </div>
+                          <div className="flex items-center gap-3 text-xs text-text-muted">
+                            {session.channel && (
+                              <span className="flex items-center gap-1">
+                                <MessageSquare className="w-3 h-3" />
+                                {session.channel}
+                              </span>
+                            )}
+                            {session.messageCount > 0 && (
+                              <span>{session.messageCount} msgs</span>
+                            )}
+                            {session.lastActive && (
+                              <span className="flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                {formatTimeAgo(session.lastActive)}
+                              </span>
+                            )}
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                if (confirm(`Close session "${session.label || session.sessionKey}"?`)) {
+                                  socket?.emit('session:close', { 
+                                    sessionKey: session.sessionKey, 
+                                    gatewayId: agent.gatewayId 
+                                  }, (response) => {
+                                    if (response?.error) {
+                                      console.error('Failed to close session:', response.error)
+                                    }
+                                  })
+                                }
+                              }}
+                              className="p-1 hover:bg-red-500/20 rounded text-text-muted hover:text-red-400 transition-colors"
+                              title="Close session"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              
               {/* Quick Stats */}
               <div className="border-t border-border-default pt-4">
                 <h3 className="text-sm font-semibold text-text-secondary mb-3">Quick Stats</h3>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="bg-bg-hover rounded-lg p-3 text-center">
-                    <p className="text-2xl font-bold text-blue-400">{metrics.sessionsToday}</p>
-                    <p className="text-xs text-text-muted">Sessions Today</p>
+                    <p className="text-2xl font-bold text-blue-400">{agent.sessionCount || agent.sessions?.length || 0}</p>
+                    <p className="text-xs text-text-muted">Sessions</p>
                   </div>
                   <div className="bg-bg-hover rounded-lg p-3 text-center">
-                    <p className="text-2xl font-bold text-green-400">{metrics.successRate}</p>
-                    <p className="text-xs text-text-muted">Success Rate</p>
+                    <p className="text-2xl font-bold text-green-400">{agent.sessions?.filter(s => s.status === 'active').length || 0}</p>
+                    <p className="text-xs text-text-muted">Active Now</p>
                   </div>
                   <div className="bg-bg-hover rounded-lg p-3 text-center">
-                    <p className="text-2xl font-bold text-purple-400">{metrics.avgResponseTime}</p>
-                    <p className="text-xs text-text-muted">Avg Response</p>
+                    <p className="text-2xl font-bold text-purple-400">{agent.totalMessages || agent.messageCount || 0}</p>
+                    <p className="text-xs text-text-muted">Messages</p>
                   </div>
                 </div>
               </div>
             </div>
           )}
           
-          {/* Sessions/History Tab */}
+          {/* Sessions Tab */}
           {activeTab === 'sessions' && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-text-secondary">Recent Session Activity</h3>
-                <button
-                  onClick={() => setLoading(true)}
-                  className="text-xs text-text-muted hover:text-text-primary flex items-center gap-1"
-                >
-                  <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
-                  Refresh
-                </button>
+                <h3 className="text-sm font-semibold text-text-secondary">
+                  All Sessions ({agent.sessions?.length || 0})
+                </h3>
+                <div className="flex items-center gap-2 text-xs text-text-muted">
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-green-500" />
+                    {agent.sessions?.filter(s => s.status === 'active').length || 0} active
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-gray-500" />
+                    {agent.sessions?.filter(s => s.status !== 'active').length || 0} idle
+                  </span>
+                </div>
               </div>
               
-              {loading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="w-6 h-6 animate-spin text-text-muted" />
-                </div>
-              ) : sessionHistory.length === 0 ? (
+              {(!agent.sessions || agent.sessions.length === 0) ? (
                 <div className="text-center py-12 text-text-muted">
                   <History className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                  <p>No session history available</p>
+                  <p>No sessions found</p>
+                  <p className="text-xs mt-1">Sessions will appear when the agent is active</p>
                 </div>
               ) : (
-                <div className="space-y-2 max-h-96 overflow-y-auto">
-                  {sessionHistory.map((item, i) => (
-                    <div key={item.id || i} className={`p-3 rounded-lg border ${
-                      item.role === 'user' ? 'bg-blue-500/10 border-blue-500/20' :
-                      item.role === 'assistant' ? 'bg-green-500/10 border-green-500/20' :
-                      'bg-purple-500/10 border-purple-500/20'
+                <div className="space-y-2">
+                  {agent.sessions.map((session, idx) => (
+                    <div key={session.sessionKey || idx} className={`bg-bg-hover rounded-lg p-4 border ${
+                      session.status === 'active' ? 'border-green-500/30' : 'border-border-default'
                     }`}>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className={`text-xs font-medium uppercase ${
-                          item.role === 'user' ? 'text-blue-400' :
-                          item.role === 'assistant' ? 'text-green-400' :
-                          'text-purple-400'
-                        }`}>
-                          {item.type === 'tool_use' ? `Tool: ${item.name}` : item.role}
-                        </span>
-                        <span className="text-xs text-text-muted">
-                          {item.timestamp ? formatTimeAgo(item.timestamp) : ''}
-                        </span>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className={`status-dot status-${session.status || 'idle'}`} />
+                          <span className="font-medium">{session.label || session.sessionKey}</span>
+                          {session.status === 'active' && (
+                            <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded">Active</span>
+                          )}
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (confirm(`Close session "${session.label || session.sessionKey}"?`)) {
+                              socket?.emit('session:close', { 
+                                sessionKey: session.sessionKey, 
+                                gatewayId: agent.gatewayId 
+                              }, (response) => {
+                                if (response?.error) {
+                                  alert('Failed to close session: ' + response.error)
+                                }
+                              })
+                            }
+                          }}
+                          className="p-1.5 hover:bg-red-500/20 rounded text-text-muted hover:text-red-400 transition-colors"
+                          title="Close session"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
                       </div>
-                      {item.content && (
-                        <p className="text-sm text-text-primary line-clamp-3">{item.content}</p>
-                      )}
+                      <div className="flex items-center gap-4 text-xs text-text-muted">
+                        {session.channel && (
+                          <span className="flex items-center gap-1">
+                            <MessageSquare className="w-3 h-3" />
+                            {session.channel}
+                          </span>
+                        )}
+                        {session.messageCount > 0 && (
+                          <span className="flex items-center gap-1">
+                            <MessageSquare className="w-3 h-3" />
+                            {session.messageCount} messages
+                          </span>
+                        )}
+                        {session.lastActive && (
+                          <span className="flex items-center gap-1">
+                            <Clock className="w-3 h-3" />
+                            Last active: {formatTimeAgo(session.lastActive)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-2 text-xs text-text-muted font-mono bg-bg-dark rounded px-2 py-1 truncate">
+                        {session.sessionKey}
+                      </div>
                     </div>
                   ))}
                 </div>

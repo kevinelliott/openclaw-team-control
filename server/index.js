@@ -163,6 +163,141 @@ io.on('connection', (socket) => {
     const discovered = await gatewayManager.discoverLocal();
     socket.emit('discovery:complete', { discovered: discovered.length, gateways: discovered });
   });
+
+  // Agent actions - get session history
+  socket.on('agent:getHistory', async ({ agentId, gatewayId }, callback) => {
+    if (typeof callback !== 'function') return;
+    
+    try {
+      const agent = gatewayManager.getAgents().find(a => a.id === agentId);
+      if (!agent) {
+        return callback({ error: 'Agent not found', history: [] });
+      }
+      
+      // Try to get history via gateway protocol
+      const result = await gatewayManager.sendRequest(gatewayId, 'sessions.history', {
+        sessionKey: agent.sessionKey,
+        limit: 50
+      });
+      
+      callback({ history: result?.messages || [] });
+    } catch (err) {
+      console.log(`Failed to get history for ${agentId}:`, err.message);
+      callback({ error: err.message, history: [] });
+    }
+  });
+
+  // Agent actions - terminate
+  socket.on('agent:terminate', async ({ agentId, gatewayId }, callback) => {
+    if (typeof callback !== 'function') return;
+    
+    try {
+      const agent = gatewayManager.getAgents().find(a => a.id === agentId);
+      if (!agent) {
+        return callback({ error: 'Agent not found' });
+      }
+      
+      // Send delete request to gateway (gateway expects 'key' not 'sessionKey')
+      await gatewayManager.sendRequest(gatewayId, 'sessions.delete', {
+        key: agent.sessionKey
+      });
+      
+      callback({ success: true });
+    } catch (err) {
+      console.log(`Failed to terminate ${agentId}:`, err.message);
+      callback({ error: err.message });
+    }
+  });
+
+  // Agent actions - restart
+  socket.on('agent:restart', async ({ agentId, gatewayId }, callback) => {
+    if (typeof callback !== 'function') return;
+    
+    try {
+      const agent = gatewayManager.getAgents().find(a => a.id === agentId);
+      if (!agent) {
+        return callback({ error: 'Agent not found' });
+      }
+      
+      // Restart = send a message to wake/restart the session
+      await gatewayManager.sendRequest(gatewayId, 'sessions.send', {
+        sessionKey: agent.sessionKey,
+        message: '/restart'
+      });
+      
+      callback({ success: true });
+    } catch (err) {
+      console.log(`Failed to restart ${agentId}:`, err.message);
+      callback({ error: err.message });
+    }
+  });
+
+  // Agent actions - pause/resume (not directly supported, but we can try)
+  socket.on('agent:pause', async ({ agentId, gatewayId }, callback) => {
+    if (typeof callback !== 'function') return;
+    callback({ error: 'Pause not supported yet' });
+  });
+
+  socket.on('agent:resume', async ({ agentId, gatewayId }, callback) => {
+    if (typeof callback !== 'function') return;
+    callback({ error: 'Resume not supported yet' });
+  });
+
+  // Agent actions - refresh data
+  socket.on('agent:refresh', async ({ agentId, gatewayId }, callback) => {
+    if (typeof callback !== 'function') return;
+    
+    try {
+      // Re-fetch sessions from gateway
+      const result = await gatewayManager.sendRequest(gatewayId, 'sessions.list', {});
+      callback({ success: true, sessions: result?.sessions?.length || 0 });
+    } catch (err) {
+      callback({ error: err.message });
+    }
+  });
+
+  // Close individual session
+  socket.on('session:close', async ({ sessionKey, gatewayId }, callback) => {
+    if (typeof callback !== 'function') return;
+    
+    if (!sessionKey || !gatewayId) {
+      return callback({ error: 'sessionKey and gatewayId required' });
+    }
+    
+    try {
+      // Gateway expects 'key' not 'sessionKey'
+      await gatewayManager.sendRequest(gatewayId, 'sessions.delete', {
+        key: sessionKey
+      });
+      callback({ success: true });
+    } catch (err) {
+      console.log(`Failed to close session ${sessionKey}:`, err.message);
+      callback({ error: err.message });
+    }
+  });
+
+  // Agent actions - send message
+  socket.on('agent:sendMessage', async ({ agentId, gatewayId, message }, callback) => {
+    if (!message) return;
+    
+    try {
+      const agent = gatewayManager.getAgents().find(a => a.id === agentId);
+      if (!agent) {
+        if (typeof callback === 'function') callback({ error: 'Agent not found' });
+        return;
+      }
+      
+      await gatewayManager.sendRequest(gatewayId, 'sessions.send', {
+        sessionKey: agent.sessionKey,
+        message
+      });
+      
+      if (typeof callback === 'function') callback({ success: true });
+    } catch (err) {
+      console.log(`Failed to send message to ${agentId}:`, err.message);
+      if (typeof callback === 'function') callback({ error: err.message });
+    }
+  });
   
   socket.on('disconnect', () => {
     console.log('👋 Client disconnected:', socket.id);

@@ -168,6 +168,13 @@ class GatewayManager extends EventEmitter {
   }
 
   /**
+   * Public method to send a request to a gateway
+   */
+  async sendRequest(gatewayId, method, params, timeoutMs = 10000) {
+    return this._sendRequest(gatewayId, method, params, timeoutMs);
+  }
+
+  /**
    * Generate unique request ID
    */
   _generateRequestId() {
@@ -266,7 +273,7 @@ class GatewayManager extends EventEmitter {
       },
       caps: ['sessions.list', 'agents.list', 'sessions.subscribe'],
       role: 'operator',
-      scopes: ['operator.read'],
+      scopes: ['operator.read', 'operator.write', 'operator.admin'],
       auth: gateway.token ? { token: gateway.token } : undefined
     };
 
@@ -425,29 +432,79 @@ class GatewayManager extends EventEmitter {
 
   /**
    * Update sessions from gateway as agents
+   * Groups sessions by agentId to show actual agents, not individual sessions
    */
   _updateSessionsFromGateway(gatewayId, sessions) {
     const gateway = this.gateways.get(gatewayId);
     if (!gateway) return;
 
-    const seenAgentIds = new Set();
+    // Group sessions by agentId
+    const agentMap = new Map(); // agentId -> { sessions, metadata }
 
     for (const session of sessions) {
-      const agent = this._sessionToAgent(gatewayId, session);
-      seenAgentIds.add(agent.id);
+      const agentId = this._extractAgentId(session);
+      if (!agentId) continue;
+
+      if (!agentMap.has(agentId)) {
+        agentMap.set(agentId, {
+          sessions: [],
+          latestActivity: null,
+          totalMessages: 0
+        });
+      }
+
+      const group = agentMap.get(agentId);
+      group.sessions.push(session);
+      group.totalMessages += session.messageCount || 0;
       
-      const existing = this.agents.get(agent.id);
+      const activityTime = session.lastActiveAt || session.updatedAt;
+      if (activityTime && (!group.latestActivity || activityTime > group.latestActivity)) {
+        group.latestActivity = activityTime;
+      }
+    }
+
+    const seenAgentIds = new Set();
+
+    // Create/update agent objects
+    for (const [agentId, group] of agentMap) {
+      const compositeId = `${gatewayId}:${agentId}`;
+      seenAgentIds.add(compositeId);
+
+      const hasActive = group.sessions.some(s => s.status === 'active' || s.active);
+      
+      const agent = {
+        id: compositeId,
+        gatewayId,
+        agentId,
+        name: agentId, // e.g., "main", "pilot", "canvas"
+        status: hasActive ? 'active' : 'idle',
+        sessionCount: group.sessions.length,
+        sessions: group.sessions.map(s => ({
+          sessionKey: s.sessionKey || s.key || s.id,
+          label: s.label || this._deriveSessionLabel(s),
+          channel: s.channel,
+          status: s.status || (s.active ? 'active' : 'idle'),
+          lastActive: s.lastActiveAt || s.updatedAt,
+          messageCount: s.messageCount || 0
+        })),
+        lastActive: group.latestActivity,
+        totalMessages: group.totalMessages,
+        avatar: this._getAgentAvatar(agentId),
+        metadata: {}
+      };
+
+      const existing = this.agents.get(compositeId);
       if (!existing || JSON.stringify(existing) !== JSON.stringify(agent)) {
-        this.agents.set(agent.id, agent);
+        this.agents.set(compositeId, agent);
         this.emit('agent:update', agent);
       }
     }
 
     // Remove agents that no longer exist
-    for (const [agentId, agent] of this.agents) {
-      if (agent.gatewayId === gatewayId && !seenAgentIds.has(agentId)) {
-        this.agents.delete(agentId);
-        this.emit('agent:removed', { id: agentId });
+    for (const [compositeId, agent] of this.agents) {
+      if (agent.gatewayId === gatewayId && !seenAgentIds.has(compositeId)) {
+        this.agents.delete(compositeId);
+        this.emit('agent:removed', { id: compositeId });
       }
     }
 
@@ -455,39 +512,142 @@ class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Update a single session as agent
+   * Extract agentId from session data
+   * Session keys look like: agent:main:telegram:group:-123:topic:1
+   */
+  _extractAgentId(session) {
+    // First check if session has explicit agentId
+    if (session.agentId) return session.agentId;
+
+    // Extract from sessionKey pattern: agent:{agentId}:{rest...}
+    const key = session.sessionKey || session.key || session.id;
+    if (!key) return null;
+
+    const parts = key.split(':');
+    if (parts[0] === 'agent' && parts.length >= 2) {
+      return parts[1]; // e.g., "main", "pilot", "canvas"
+    }
+
+    return null;
+  }
+
+  /**
+   * Get avatar URL/emoji for an agent
+   */
+  _getAgentAvatar(agentId) {
+    // Default avatars for known agent types
+    const avatars = {
+      main: '🗿',      // Henry the Great
+      personal: '🎩',  // Jeeves
+      family: '🏠',    // Bixby
+      pilot: '🧭',     // Pilot
+      pixel: '🖼️',     // Pixel
+      forge: '🔥',     // Forge
+      atlas: '🗺️',     // Atlas
+      compass: '🧭',   // Compass
+      canvas: '🎨',    // Canvas
+      cron: '⏰',
+      default: '🤖'
+    };
+    return avatars[agentId] || avatars.default;
+  }
+
+  /**
+   * Derive a human-readable label for a session
+   */
+  _deriveSessionLabel(session) {
+    const key = session.sessionKey || session.key || session.id;
+    if (!key) return 'Session';
+
+    const parts = key.split(':');
+    if (parts[0] === 'agent' && parts.length >= 3) {
+      const sessionType = parts[2]; // e.g., "main", "telegram", "cron"
+
+      if (sessionType === 'main') {
+        return 'Main Session';
+      } else if (sessionType === 'telegram') {
+        const topicIdx = parts.indexOf('topic');
+        if (topicIdx !== -1 && parts[topicIdx + 1]) {
+          return `Telegram Topic ${parts[topicIdx + 1]}`;
+        }
+        return 'Telegram';
+      } else if (sessionType === 'cron') {
+        return 'Cron Job';
+      } else {
+        return sessionType.charAt(0).toUpperCase() + sessionType.slice(1);
+      }
+    }
+
+    return key.slice(0, 20) || 'Session';
+  }
+
+  /**
+   * Update a single session - merges into existing agent or creates new
    */
   _updateSession(gatewayId, sessionData) {
     if (!sessionData) return;
     
-    const agent = this._sessionToAgent(gatewayId, sessionData);
-    this.agents.set(agent.id, agent);
-    this.emit('agent:update', agent);
+    const agentId = this._extractAgentId(sessionData);
+    if (!agentId) return;
 
-    const gateway = this.gateways.get(gatewayId);
-    if (gateway && !gateway.agents.includes(agent.id)) {
-      gateway.agents.push(agent.id);
-    }
-  }
+    const compositeId = `${gatewayId}:${agentId}`;
+    const existingAgent = this.agents.get(compositeId);
 
-  /**
-   * Convert session data to agent format
-   */
-  _sessionToAgent(gatewayId, session) {
-    return {
-      id: `${gatewayId}:${session.sessionKey || session.key || session.id}`,
-      gatewayId,
-      sessionKey: session.sessionKey || session.key || session.id,
-      name: session.label || this._deriveAgentName(session),
-      agentId: session.agentId,
-      status: session.status || (session.active ? 'active' : 'idle'),
-      channel: session.channel,
-      model: session.model,
-      lastActive: session.lastActiveAt || session.updatedAt || null,
-      createdAt: session.createdAt,
-      messageCount: session.messageCount || 0,
-      metadata: session.metadata || {}
+    const newSession = {
+      sessionKey: sessionData.sessionKey || sessionData.key || sessionData.id,
+      label: sessionData.label || this._deriveSessionLabel(sessionData),
+      channel: sessionData.channel,
+      status: sessionData.status || (sessionData.active ? 'active' : 'idle'),
+      lastActive: sessionData.lastActiveAt || sessionData.updatedAt,
+      messageCount: sessionData.messageCount || 0
     };
+
+    if (existingAgent) {
+      // Update existing session or add new one
+      const sessionIdx = existingAgent.sessions.findIndex(s => s.sessionKey === newSession.sessionKey);
+      if (sessionIdx >= 0) {
+        existingAgent.sessions[sessionIdx] = newSession;
+      } else {
+        existingAgent.sessions.push(newSession);
+        existingAgent.sessionCount = existingAgent.sessions.length;
+      }
+      
+      // Recalculate totals
+      existingAgent.totalMessages = existingAgent.sessions.reduce((acc, s) => acc + (s.messageCount || 0), 0);
+      existingAgent.status = existingAgent.sessions.some(s => s.status === 'active') ? 'active' : 'idle';
+      
+      const latestActivity = existingAgent.sessions
+        .map(s => s.lastActive)
+        .filter(Boolean)
+        .sort()
+        .pop();
+      if (latestActivity) existingAgent.lastActive = latestActivity;
+
+      this.emit('agent:update', existingAgent);
+    } else {
+      // Create new agent
+      const agent = {
+        id: compositeId,
+        gatewayId,
+        agentId,
+        name: agentId,
+        status: newSession.status === 'active' ? 'active' : 'idle',
+        sessionCount: 1,
+        sessions: [newSession],
+        lastActive: newSession.lastActive,
+        totalMessages: newSession.messageCount || 0,
+        avatar: this._getAgentAvatar(agentId),
+        metadata: {}
+      };
+
+      this.agents.set(compositeId, agent);
+      this.emit('agent:update', agent);
+
+      const gateway = this.gateways.get(gatewayId);
+      if (gateway && !gateway.agents.includes(compositeId)) {
+        gateway.agents.push(compositeId);
+      }
+    }
   }
 
   /**
@@ -504,40 +664,6 @@ class GatewayManager extends EventEmitter {
     if (gateway && !gateway.agents.includes(agent.id)) {
       gateway.agents.push(agent.id);
     }
-  }
-
-  /**
-   * Derive a human-readable name from session key
-   * e.g. "agent:main:telegram:group:-123:topic:1" -> "main / telegram:topic:1"
-   * e.g. "agent:main:cron:abc123" -> "main / cron"
-   * e.g. "agent:pilot:main" -> "pilot / main"
-   */
-  _deriveAgentName(session) {
-    const key = session.sessionKey || session.key || session.id;
-    if (!key) return session.agentId || 'Session';
-
-    const parts = key.split(':');
-    if (parts[0] === 'agent' && parts.length >= 3) {
-      const agentName = parts[1]; // e.g. "main", "pilot", "canvas"
-      const sessionType = parts[2]; // e.g. "main", "telegram", "cron"
-
-      if (sessionType === 'main') {
-        return `${agentName}`;  // Just "main", "pilot", etc.
-      } else if (sessionType === 'telegram') {
-        // Look for topic indicator
-        const topicIdx = parts.indexOf('topic');
-        if (topicIdx !== -1) {
-          return `${agentName} / telegram:topic:${parts[topicIdx + 1] || '?'}`;
-        }
-        return `${agentName} / telegram`;
-      } else if (sessionType === 'cron') {
-        return `${agentName} / cron`;
-      } else {
-        return `${agentName} / ${sessionType}`;
-      }
-    }
-
-    return session.agentId || key.slice(0, 20) || 'Session';
   }
 
   /**
