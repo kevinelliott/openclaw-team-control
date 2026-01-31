@@ -478,7 +478,7 @@ class GatewayManager extends EventEmitter {
       id: `${gatewayId}:${session.sessionKey || session.key || session.id}`,
       gatewayId,
       sessionKey: session.sessionKey || session.key || session.id,
-      name: session.label || session.agentId || session.sessionKey || 'Session',
+      name: session.label || this._deriveAgentName(session),
       agentId: session.agentId,
       status: session.status || (session.active ? 'active' : 'idle'),
       channel: session.channel,
@@ -504,6 +504,40 @@ class GatewayManager extends EventEmitter {
     if (gateway && !gateway.agents.includes(agent.id)) {
       gateway.agents.push(agent.id);
     }
+  }
+
+  /**
+   * Derive a human-readable name from session key
+   * e.g. "agent:main:telegram:group:-123:topic:1" -> "main / telegram:topic:1"
+   * e.g. "agent:main:cron:abc123" -> "main / cron"
+   * e.g. "agent:pilot:main" -> "pilot / main"
+   */
+  _deriveAgentName(session) {
+    const key = session.sessionKey || session.key || session.id;
+    if (!key) return session.agentId || 'Session';
+
+    const parts = key.split(':');
+    if (parts[0] === 'agent' && parts.length >= 3) {
+      const agentName = parts[1]; // e.g. "main", "pilot", "canvas"
+      const sessionType = parts[2]; // e.g. "main", "telegram", "cron"
+
+      if (sessionType === 'main') {
+        return `${agentName}`;  // Just "main", "pilot", etc.
+      } else if (sessionType === 'telegram') {
+        // Look for topic indicator
+        const topicIdx = parts.indexOf('topic');
+        if (topicIdx !== -1) {
+          return `${agentName} / telegram:topic:${parts[topicIdx + 1] || '?'}`;
+        }
+        return `${agentName} / telegram`;
+      } else if (sessionType === 'cron') {
+        return `${agentName} / cron`;
+      } else {
+        return `${agentName} / ${sessionType}`;
+      }
+    }
+
+    return session.agentId || key.slice(0, 20) || 'Session';
   }
 
   /**
