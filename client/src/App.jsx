@@ -484,55 +484,70 @@ function AgentCard({ agent, onClick }) {
     agent.name.charAt(0).toUpperCase() + agent.name.slice(1) : 
     agent.agentId || agent.id;
 
-  // Count active sessions
-  const activeSessions = agent.sessions?.filter(s => s.status === 'active').length || 0;
-  const totalSessions = agent.sessionCount || agent.sessions?.length || 0;
+  // Session type badge colors
+  const typeBadges = {
+    cron: { label: 'Cron', color: 'bg-purple-500/20 text-purple-300' },
+    subagent: { label: 'Sub-agent', color: 'bg-blue-500/20 text-blue-300' },
+    group: { label: 'Group', color: 'bg-cyan-500/20 text-cyan-300' },
+    main: { label: 'Main', color: 'bg-green-500/20 text-green-300' },
+    chat: { label: 'Chat', color: 'bg-zinc-500/20 text-zinc-300' },
+  };
+  const badge = typeBadges[agent.sessionType] || typeBadges.chat;
   
   return (
     <div 
       onClick={onClick}
-      className={`bg-bg-hover rounded-lg p-3 border transition-all cursor-pointer hover:shadow-lg ${statusColors[agent.status] || statusColors.idle}`}
+      className={`bg-bg-hover rounded-xl p-4 border transition-all cursor-pointer hover:shadow-lg hover:scale-[1.02] ${statusColors[agent.status] || statusColors.idle}`}
     >
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2 min-w-0">
-          {/* Avatar */}
-          <span className="text-xl shrink-0" title={agent.agentId || 'Agent'}>
-            {agent.avatar || '🤖'}
-          </span>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className={`status-dot status-${agent.status || 'idle'} shrink-0`} />
-              <span className="font-medium truncate">{displayName}</span>
-            </div>
-            {agent.agentId && agent.agentId !== agent.name && (
-              <p className="text-text-muted text-xs truncate">{agent.agentId}</p>
-            )}
-          </div>
+      {/* Large centered avatar */}
+      <div className="flex flex-col items-center text-center mb-3">
+        <div className={`text-5xl mb-2 ${agent.status === 'active' ? 'animate-pulse' : ''}`}>
+          {agent.avatar || '🤖'}
         </div>
-        {agent.status === 'active' && (
-          <Zap className="w-3 h-3 text-green-400 shrink-0 animate-pulse" />
+        <div className="flex items-center gap-2">
+          <span className={`status-dot status-${agent.status || 'idle'}`} />
+          <span className="font-semibold text-lg">{displayName}</span>
+        </div>
+        {/* Agent ID if different from name */}
+        {agent.agentId && agent.agentId !== agent.name?.toLowerCase() && (
+          <p className="text-text-muted text-xs mt-0.5">{agent.agentId}</p>
         )}
       </div>
-      <div className="space-y-1">
-        {/* Sessions count */}
-        {totalSessions > 0 && (
-          <p className="text-text-muted text-xs flex items-center gap-1">
+      
+      {/* Type badge */}
+      <div className="flex justify-center mb-3">
+        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${badge.color}`}>
+          {badge.label}
+        </span>
+      </div>
+      
+      {/* Stats row */}
+      <div className="flex justify-center gap-4 text-xs text-text-muted">
+        {agent.messageCount > 0 && (
+          <span className="flex items-center gap-1">
             <MessageSquare className="w-3 h-3" />
-            {totalSessions} session{totalSessions !== 1 ? 's' : ''}
-            {activeSessions > 0 && (
-              <span className="text-green-400">({activeSessions} active)</span>
-            )}
-          </p>
+            {agent.messageCount}
+          </span>
         )}
-        {/* Total messages */}
-        {(agent.totalMessages || agent.messageCount) > 0 && (
-          <p className="text-text-muted text-xs">{agent.totalMessages || agent.messageCount} messages</p>
+        {agent.channel && agent.channel !== 'unknown' && (
+          <span className="flex items-center gap-1 capitalize">
+            {agent.channel}
+          </span>
         )}
       </div>
+      
+      {/* Last active */}
       {agent.lastActive && (
-        <p className="text-text-muted text-xs mt-2 flex items-center gap-1">
+        <p className="text-text-muted text-xs mt-2 text-center flex items-center justify-center gap-1">
           <Clock className="w-3 h-3" />
           {formatTimeAgo(agent.lastActive)}
+        </p>
+      )}
+      
+      {/* Model indicator */}
+      {agent.model && (
+        <p className="text-text-muted text-xs mt-1 text-center truncate opacity-60">
+          {agent.model}
         </p>
       )}
     </div>

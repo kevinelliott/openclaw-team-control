@@ -431,66 +431,61 @@ class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Update sessions from gateway as agents
-   * Groups sessions by agentId to show actual agents, not individual sessions
+   * Update sessions from gateway - shows each session individually
    */
   _updateSessionsFromGateway(gatewayId, sessions) {
     const gateway = this.gateways.get(gatewayId);
     if (!gateway) return;
 
-    // Group sessions by agentId
-    const agentMap = new Map(); // agentId -> { sessions, metadata }
+    const seenIds = new Set();
 
     for (const session of sessions) {
-      const agentId = this._extractAgentId(session);
-      if (!agentId) continue;
-
-      if (!agentMap.has(agentId)) {
-        agentMap.set(agentId, {
-          sessions: [],
-          latestActivity: null,
-          totalMessages: 0
-        });
-      }
-
-      const group = agentMap.get(agentId);
-      group.sessions.push(session);
-      group.totalMessages += session.messageCount || 0;
+      const sessionKey = session.sessionKey || session.key || session.id;
+      if (!sessionKey) continue;
       
-      const activityTime = session.lastActiveAt || session.updatedAt;
-      if (activityTime && (!group.latestActivity || activityTime > group.latestActivity)) {
-        group.latestActivity = activityTime;
+      const compositeId = `${gatewayId}:${sessionKey}`;
+      seenIds.add(compositeId);
+      
+      const agentId = this._extractAgentId(session);
+      const sessionType = this._getSessionType(sessionKey);
+      const isActive = session.status === 'active' || session.active;
+      
+      // Derive a friendly name
+      let displayName = session.label || session.displayName;
+      if (!displayName) {
+        if (sessionType === 'cron') {
+          displayName = 'Scheduled Task';
+        } else if (sessionType === 'subagent') {
+          displayName = session.label || 'Sub-agent';
+        } else if (sessionType === 'group') {
+          displayName = session.displayName || 'Group Chat';
+        } else if (sessionType === 'main') {
+          displayName = 'Main Chat';
+        } else {
+          displayName = this._deriveSessionLabel(session);
+        }
       }
-    }
-
-    const seenAgentIds = new Set();
-
-    // Create/update agent objects
-    for (const [agentId, group] of agentMap) {
-      const compositeId = `${gatewayId}:${agentId}`;
-      seenAgentIds.add(compositeId);
-
-      const hasActive = group.sessions.some(s => s.status === 'active' || s.active);
       
       const agent = {
         id: compositeId,
         gatewayId,
-        agentId,
-        name: agentId, // e.g., "main", "pilot", "canvas"
-        status: hasActive ? 'active' : 'idle',
-        sessionCount: group.sessions.length,
-        sessions: group.sessions.map(s => ({
-          sessionKey: s.sessionKey || s.key || s.id,
-          label: s.label || this._deriveSessionLabel(s),
-          channel: s.channel,
-          status: s.status || (s.active ? 'active' : 'idle'),
-          lastActive: s.lastActiveAt || s.updatedAt,
-          messageCount: s.messageCount || 0
-        })),
-        lastActive: group.latestActivity,
-        totalMessages: group.totalMessages,
-        avatar: this._getAgentAvatar(agentId),
-        metadata: {}
+        agentId: agentId || 'unknown',
+        sessionKey,
+        sessionType,
+        name: displayName,
+        status: isActive ? 'active' : 'idle',
+        channel: session.channel || 'unknown',
+        lastActive: session.lastActiveAt || session.updatedAt,
+        messageCount: session.messageCount || 0,
+        totalTokens: session.totalTokens || 0,
+        model: session.model,
+        avatar: this._getAgentAvatar(agentId, sessionType),
+        // Include extra context
+        displayContext: session.displayName || session.deliveryContext?.to,
+        metadata: {
+          contextTokens: session.contextTokens,
+          transcriptPath: session.transcriptPath
+        }
       };
 
       const existing = this.agents.get(compositeId);
@@ -500,15 +495,15 @@ class GatewayManager extends EventEmitter {
       }
     }
 
-    // Remove agents that no longer exist
+    // Remove sessions that no longer exist
     for (const [compositeId, agent] of this.agents) {
-      if (agent.gatewayId === gatewayId && !seenAgentIds.has(compositeId)) {
+      if (agent.gatewayId === gatewayId && !seenIds.has(compositeId)) {
         this.agents.delete(compositeId);
         this.emit('agent:removed', { id: compositeId });
       }
     }
 
-    gateway.agents = Array.from(seenAgentIds);
+    gateway.agents = Array.from(seenIds);
   }
 
   /**
@@ -532,10 +527,15 @@ class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Get avatar URL/emoji for an agent
+   * Get avatar URL/emoji for an agent or session type
    */
-  _getAgentAvatar(agentId) {
-    // Default avatars for known agent types
+  _getAgentAvatar(agentId, sessionType = null) {
+    // Session type avatars
+    if (sessionType === 'cron') return '⏰';
+    if (sessionType === 'subagent') return '🔧';
+    if (sessionType === 'group') return '👥';
+    
+    // Agent-specific avatars
     const avatars = {
       main: '🗿',      // Henry the Great
       personal: '🎩',  // Jeeves
@@ -550,6 +550,18 @@ class GatewayManager extends EventEmitter {
       default: '🤖'
     };
     return avatars[agentId] || avatars.default;
+  }
+  
+  /**
+   * Detect session type from session key
+   */
+  _getSessionType(sessionKey) {
+    if (!sessionKey) return 'unknown';
+    if (sessionKey.includes(':cron:')) return 'cron';
+    if (sessionKey.includes(':subagent:')) return 'subagent';
+    if (sessionKey.includes(':group:') || sessionKey.includes(':topic:')) return 'group';
+    if (sessionKey.match(/^agent:[^:]+:main$/)) return 'main';
+    return 'chat';
   }
 
   /**
